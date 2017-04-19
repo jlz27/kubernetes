@@ -947,20 +947,6 @@ func (c *Cloud) NodeAddresses(name types.NodeName) ([]v1.NodeAddress, error) {
 	}
 
 	addresses := []v1.NodeAddress{}
-
-	if !isNilOrEmpty(instance.PrivateIpAddress) {
-		ipAddress := *instance.PrivateIpAddress
-		ip := net.ParseIP(ipAddress)
-		if ip == nil {
-			return nil, fmt.Errorf("EC2 instance had invalid private address: %s (%s)", orEmpty(instance.InstanceId), ipAddress)
-		}
-		addresses = append(addresses, v1.NodeAddress{Type: v1.NodeInternalIP, Address: ip.String()})
-
-		// Legacy compatibility: the private ip was the legacy host ip
-		addresses = append(addresses, v1.NodeAddress{Type: v1.NodeLegacyHostIP, Address: ip.String()})
-	}
-
-	// TODO: Other IP addresses (multiple ips)?
 	if !isNilOrEmpty(instance.PublicIpAddress) {
 		ipAddress := *instance.PublicIpAddress
 		ip := net.ParseIP(ipAddress)
@@ -970,12 +956,34 @@ func (c *Cloud) NodeAddresses(name types.NodeName) ([]v1.NodeAddress, error) {
 		addresses = append(addresses, v1.NodeAddress{Type: v1.NodeExternalIP, Address: ip.String()})
 	}
 
-	if !isNilOrEmpty(instance.PrivateDnsName) {
-		addresses = append(addresses, v1.NodeAddress{Type: v1.NodeInternalDNS, Address: *instance.PrivateDnsName})
-	}
 
 	if !isNilOrEmpty(instance.PublicDnsName) {
 		addresses = append(addresses, v1.NodeAddress{Type: v1.NodeExternalDNS, Address: *instance.PublicDnsName})
+	}
+
+	// handle internal network interfaces
+	for _, networkInterface := range instance.NetworkInterfaces {
+		// skip network interfaces that are not currently in use
+		if isNilOrEmpty(networkInterface.Status) || *networkInterface.Status != ec2.NetworkInterfaceStatusInUse {
+			continue
+		}
+
+		for _, internalIP := range networkInterface.PrivateIpAddresses {
+			if !isNilOrEmpty(internalIP.PrivateIpAddress) {
+				ipAddress := *internalIP.PrivateIpAddress
+				ip := net.ParseIP(ipAddress)
+				if ip == nil {
+					return nil, fmt.Errorf("EC2 instance had invalid private address: %s (%s)", orEmpty(instance.InstanceId), ipAddress)
+				}
+				addresses = append(addresses, v1.NodeAddress{Type: v1.NodeInternalIP, Address: ip.String()})
+
+				// Legacy compatibility: the private ip was the legacy host ip
+				addresses = append(addresses, v1.NodeAddress{Type: v1.NodeLegacyHostIP, Address: ip.String()})
+			}
+			if !isNilOrEmpty(internalIP.PrivateDnsName) {
+				addresses = append(addresses, v1.NodeAddress{Type: v1.NodeInternalDNS, Address: *internalIP.PrivateDnsName})
+			}
+		}
 	}
 
 	return addresses, nil
