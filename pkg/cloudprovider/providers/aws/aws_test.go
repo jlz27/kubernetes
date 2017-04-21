@@ -621,6 +621,10 @@ func TestNodeAddresses(t *testing.T) {
 	testHasNodeAddress(t, addrs4, v1.NodeExternalIP, "2.3.4.5")
 }
 
+func TestNodeAddressWithMetadata(t *testing.T) {
+	// TODO refactor and add more tests
+}
+
 func TestGetRegion(t *testing.T) {
 	aws := mockAvailabilityZone("us-west-2e")
 	zones, ok := aws.Zones()

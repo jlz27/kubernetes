@@ -904,13 +904,33 @@ func (c *Cloud) NodeAddresses(name types.NodeName) ([]v1.NodeAddress, error) {
 	if c.selfAWSInstance.nodeName == name || len(name) == 0 {
 		addresses := []v1.NodeAddress{}
 
-		internalIP, err := c.metadata.GetMetadata("local-ipv4")
-		if err != nil {
+		macs, err := c.metadata.GetMetadata("network/interfaces/macs/")
+		if err != nil || len(macs) == 0 {
 			return nil, err
 		}
-		addresses = append(addresses, v1.NodeAddress{Type: v1.NodeInternalIP, Address: internalIP})
-		// Legacy compatibility: the private ip was the legacy host ip
-		addresses = append(addresses, v1.NodeAddress{Type: v1.NodeLegacyHostIP, Address: internalIP})
+		glog.V(2).Infof("Retrieved macs from metadata %s", macs)
+		for _, macID := range strings.Split(macs, "\n") {
+			glog.V(2).Infof("Processing mac ID %s", macID)
+			internalDNS, err := c.metadata.GetMetadata(fmt.Sprintf("network/interfaces/macs/%s/local-hostname", macID))
+			if err != nil || len(internalDNS) == 0 {
+				//TODO: It would be nice to be able to determine the reason for the failure,
+				// but the AWS client masks all failures with the same error description.
+				glog.V(2).Info("Could not determine private DNS from AWS metadata.")
+			} else {
+				addresses = append(addresses, v1.NodeAddress{Type: v1.NodeInternalDNS, Address: internalDNS})
+			}
+			internalIPs, err := c.metadata.GetMetadata(fmt.Sprintf("network/interfaces/macs/%s/local-ipv4s", macID))
+			if err != nil || len(internalIPs) == 0 {
+				return nil, err
+			}
+			glog.V(2).Infof("Got internal ips %s", internalIPs)
+			for _, internalIP := range strings.Split(internalIPs, "\n") {
+				glog.V(2).Infof("Adding internal IP %s", internalIP)
+				addresses = append(addresses, v1.NodeAddress{Type: v1.NodeInternalIP, Address: internalIP})
+				// Legacy compatibility: the private ip was the legacy host ip
+				addresses = append(addresses, v1.NodeAddress{Type: v1.NodeLegacyHostIP, Address: internalIP})
+			}
+		}
 
 		externalIP, err := c.metadata.GetMetadata("public-ipv4")
 		if err != nil {
@@ -919,15 +939,6 @@ func (c *Cloud) NodeAddresses(name types.NodeName) ([]v1.NodeAddress, error) {
 			glog.V(4).Info("Could not determine public IP from AWS metadata.")
 		} else {
 			addresses = append(addresses, v1.NodeAddress{Type: v1.NodeExternalIP, Address: externalIP})
-		}
-
-		internalDNS, err := c.metadata.GetMetadata("local-hostname")
-		if err != nil || len(internalDNS) == 0 {
-			//TODO: It would be nice to be able to determine the reason for the failure,
-			// but the AWS client masks all failures with the same error description.
-			glog.V(2).Info("Could not determine private DNS from AWS metadata.")
-		} else {
-			addresses = append(addresses, v1.NodeAddress{Type: v1.NodeInternalDNS, Address: internalDNS})
 		}
 
 		externalDNS, err := c.metadata.GetMetadata("public-hostname")
@@ -947,20 +958,6 @@ func (c *Cloud) NodeAddresses(name types.NodeName) ([]v1.NodeAddress, error) {
 	}
 
 	addresses := []v1.NodeAddress{}
-
-	if !isNilOrEmpty(instance.PrivateIpAddress) {
-		ipAddress := *instance.PrivateIpAddress
-		ip := net.ParseIP(ipAddress)
-		if ip == nil {
-			return nil, fmt.Errorf("EC2 instance had invalid private address: %s (%s)", orEmpty(instance.InstanceId), ipAddress)
-		}
-		addresses = append(addresses, v1.NodeAddress{Type: v1.NodeInternalIP, Address: ip.String()})
-
-		// Legacy compatibility: the private ip was the legacy host ip
-		addresses = append(addresses, v1.NodeAddress{Type: v1.NodeLegacyHostIP, Address: ip.String()})
-	}
-
-	// TODO: Other IP addresses (multiple ips)?
 	if !isNilOrEmpty(instance.PublicIpAddress) {
 		ipAddress := *instance.PublicIpAddress
 		ip := net.ParseIP(ipAddress)
@@ -970,12 +967,34 @@ func (c *Cloud) NodeAddresses(name types.NodeName) ([]v1.NodeAddress, error) {
 		addresses = append(addresses, v1.NodeAddress{Type: v1.NodeExternalIP, Address: ip.String()})
 	}
 
-	if !isNilOrEmpty(instance.PrivateDnsName) {
-		addresses = append(addresses, v1.NodeAddress{Type: v1.NodeInternalDNS, Address: *instance.PrivateDnsName})
-	}
 
 	if !isNilOrEmpty(instance.PublicDnsName) {
 		addresses = append(addresses, v1.NodeAddress{Type: v1.NodeExternalDNS, Address: *instance.PublicDnsName})
+	}
+
+	// handle internal network interfaces
+	for _, networkInterface := range instance.NetworkInterfaces {
+		// skip network interfaces that are not currently in use
+		if isNilOrEmpty(networkInterface.Status) || *networkInterface.Status != ec2.NetworkInterfaceStatusInUse {
+			continue
+		}
+
+		for _, internalIP := range networkInterface.PrivateIpAddresses {
+			if !isNilOrEmpty(internalIP.PrivateIpAddress) {
+				ipAddress := *internalIP.PrivateIpAddress
+				ip := net.ParseIP(ipAddress)
+				if ip == nil {
+					return nil, fmt.Errorf("EC2 instance had invalid private address: %s (%s)", orEmpty(instance.InstanceId), ipAddress)
+				}
+				addresses = append(addresses, v1.NodeAddress{Type: v1.NodeInternalIP, Address: ip.String()})
+
+				// Legacy compatibility: the private ip was the legacy host ip
+				addresses = append(addresses, v1.NodeAddress{Type: v1.NodeLegacyHostIP, Address: ip.String()})
+			}
+			if !isNilOrEmpty(internalIP.PrivateDnsName) {
+				addresses = append(addresses, v1.NodeAddress{Type: v1.NodeInternalDNS, Address: *internalIP.PrivateDnsName})
+			}
+		}
 	}
 
 	return addresses, nil
